@@ -1,5 +1,4 @@
 "use client";
-import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import { onUserDelete, onUserSet } from "./utils/socket.utils";
@@ -19,27 +18,67 @@ export default function Home() {
       transports: ["websocket"],
     });
 
-    socket.on("connect", () => {
+    socket.on("connect", async () => {
       console.log(
         "Socket from client connected successfully : id = ",
         socket.id
       );
       socketRef.current = socket;
 
-      socket.emit("join-room", room, (connected: boolean) => {
+      const isJoined: boolean = await socket.emitWithAck("join-room", room);
+
+      if (isJoined) {
         console.log(
           "Has joined to room:",
           room,
           " Now getting RTP capabilities of conference room router"
         );
-        socket.emit("get-rtp-capabilities", { room }, async (ack: any) => {
-          console.log("RTP capability from server: ", ack);
-          await deviceRef.current?.load({ routerRtpCapabilities: ack });
-        });
-      });
-      socket.emit("message", { message: "Hello" }, (ack: string) => {
-        console.log("event message ack: ", ack);
-      });
+        const routerRtpCapabilities: mediasoupClient.types.RtpCapabilities =
+          await socket.emitWithAck("get-rtp-capabilities", { room });
+        console.log("RTP capability from server: ", routerRtpCapabilities);
+        await deviceRef.current?.load({ routerRtpCapabilities });
+
+        const sendTransportsInfo: mediasoupClient.types.TransportOptions =
+          await socket.emitWithAck("create-transport", {
+            room,
+            direction: "SEND",
+          });
+        console.log(
+          "Got send transport info: ",
+          sendTransportsInfo,
+          " Now creating send transport -> "
+        );
+        if (sendTransportsInfo?.id) {
+          const sendTranport =  deviceRef.current?.createSendTransport(
+            sendTransportsInfo
+          );
+          console.log({ sendTranport });
+          sendTranport?.on(
+            "connect",
+            async ({ dtlsParameters }, cb) => {
+              console.log("Hi")
+              const isConnectedSendTransport: boolean =
+                await socket.emitWithAck("connect-sendTransport", {
+                  room,
+                  transportId: sendTranport.id,
+                  dtlsParameters,
+                });
+              if (isConnectedSendTransport) {
+                console.log(
+                  "Send transport connected with server from client side"
+                );
+                cb();
+              } else {
+                // errorCb(
+                //   new Error(
+                //     "Send transport didnot connected with server with DTLS params"
+                //   )
+                // );
+              }
+            }
+          );
+        }
+      }
 
       onUserSet(socket, setUsers);
       onUserDelete(socket, setUsers);
@@ -66,7 +105,7 @@ export default function Home() {
     <div>
       <div className=" border-2 p-2 m-2 shadow-2xl">
         <input
-          className="w-[250px] border-2 p-2"
+          className="w-62.5 border-2 p-2"
           type="text"
           value={inp}
           onChange={(e) => setInp(e.target.value)}
