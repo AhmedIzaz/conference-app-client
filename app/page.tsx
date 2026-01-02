@@ -19,13 +19,18 @@ export default function Home() {
     const device = deviceRef.current;
     const socket = socketRef.current;
 
-    if (!recvTransport || !device || socket) return;
+    console.log("Checking things are ready in consume producer method: ", {recvTransport ,device,socket})
+
+    if (!recvTransport || !device || !socket) return;
 
     const consumeParams = await (socket as any)?.emitWithAck("consume", {
       room,
       producerId,
       rtpCapabilities: device.rtpCapabilities,
     });
+
+    console.log("Consume params from backend: ", consumeParams)
+
     const { id, kind, rtpParameters } = consumeParams;
 
     const consumer = await recvTransport.consume({
