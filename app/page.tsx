@@ -10,6 +10,55 @@ export default function Home() {
   const [users, setUsers] = useState<string[]>([]);
   const socketRef = useRef<Socket>(null);
   const deviceRef = useRef<mediasoupClient.Device>(null);
+
+  const producersRef = useRef<Map<string, TProducer>>(new Map());
+  const recvTransportRef = useRef<mediasoupClient.types.Transport>(undefined);
+
+  const consumeProducer = async (producerId: string) => {
+    const recvTransport = recvTransportRef.current;
+    const device = deviceRef.current;
+    const socket = socketRef.current;
+
+    if (!recvTransport || !device || socket) return;
+
+    const consumeParams = await (socket as any)?.emitWithAck("consume", {
+      room,
+      producerId,
+      rtpCapabilities: device.rtpCapabilities,
+    });
+    const { id, kind, rtpParameters } = consumeParams;
+
+    const consumer = await recvTransport.consume({
+      id,
+      producerId,
+      kind,
+      rtpParameters,
+    });
+
+    const stream = new MediaStream();
+    stream.addTrack(consumer.track);
+    // 4️⃣ Attach to DOM
+    if (kind === "video") {
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      video.autoplay = true;
+      video.playsInline = true;
+      document.body.appendChild(video);
+    }
+
+    if (kind === "audio") {
+      const audio = document.createElement("audio");
+      audio.srcObject = stream;
+      audio.autoplay = true;
+      document.body.appendChild(audio);
+    }
+
+    await (socket as any).emitWithAck("resume-consumer", {
+      room,
+      consumerId: consumer.id,
+    });
+  };
+
   useEffect(() => {
     if (!deviceRef?.current) {
       deviceRef.current = new mediasoupClient.Device();
@@ -49,32 +98,106 @@ export default function Home() {
           " Now creating send transport -> "
         );
         if (sendTransportsInfo?.id) {
-          const sendTranport =  deviceRef.current?.createSendTransport(
-            sendTransportsInfo
-          );
+          const sendTranport =
+            deviceRef.current?.createSendTransport(sendTransportsInfo);
           console.log({ sendTranport });
-          sendTranport?.on(
-            "connect",
-            async ({ dtlsParameters }, cb) => {
-              console.log("Hi")
-              const isConnectedSendTransport: boolean =
-                await socket.emitWithAck("connect-sendTransport", {
-                  room,
-                  transportId: sendTranport.id,
-                  dtlsParameters,
-                });
-              if (isConnectedSendTransport) {
-                console.log(
-                  "Send transport connected with server from client side"
-                );
-                cb();
-              } else {
-                // errorCb(
-                //   new Error(
-                //     "Send transport didnot connected with server with DTLS params"
-                //   )
-                // );
+
+          // first you need to implement sendTranport?.on("produce") and await sendTranport?.produce({ track: videoTrack });
+          // because without that, this event sendTranport?.on("connect") will not execute
+          sendTranport?.on("connect", async ({ dtlsParameters }, cb) => {
+            console.log("Send transport connecting to server.........");
+            const isConnectedSendTransport: boolean = await socket.emitWithAck(
+              "connect-sendTransport",
+              {
+                room,
+                transportId: sendTranport.id,
+                dtlsParameters,
               }
+            );
+            if (isConnectedSendTransport) {
+              console.log(
+                "Send transport connected with server from client side"
+              );
+              cb();
+            } else {
+              // errorCb(
+              //   new Error(
+              //     "Send transport didnot connected with server with DTLS params"
+              //   )
+              // );
+            }
+          });
+
+          sendTranport?.on("produce", async ({ kind, rtpParameters }, cb) => {
+            const { id }: { id: string } = await socket.emitWithAck("produce", {
+              room,
+              kind,
+              rtpParameters,
+              transportId: sendTranport.id,
+            });
+            cb({ id });
+          });
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: true,
+          });
+
+          const videoTrack = stream.getVideoTracks()[0];
+          await sendTranport?.produce({ track: videoTrack });
+        }
+
+        socket.on("new-producer", async (data: TProducer) => {
+          const { producerId, kind, peerId } = data ?? {};
+          console.log(
+            "New producer detected:",
+            producerId,
+            "from peer:",
+            peerId,
+            "kind:",
+            kind
+          );
+          producersRef.current.set(producerId, {
+            producerId,
+            peerId,
+            kind,
+          });
+          console.log("Going to consume the producer: ", { producerId });
+          await consumeProducer(producerId);
+        });
+
+        ////////////////////////////////////////////
+        ////////////////////////////////////////////
+        // RECIEVE TRANPORT PART ------------------
+        // -----------------------------------------
+        const recvTransportInfo: mediasoupClient.types.TransportOptions =
+          await socket.emitWithAck("create-transport", {
+            room,
+            direction: "RECV",
+          });
+        console.log(
+          "Got recieve transport info: ",
+          sendTransportsInfo,
+          " Now creating recieve transport -> "
+        );
+        if (recvTransportInfo.id) {
+          const recvTransport =
+            deviceRef.current?.createRecvTransport(recvTransportInfo);
+          console.log({ recvTransport });
+
+          recvTransportRef.current = recvTransport;
+
+          recvTransport?.on(
+            "connect",
+            async ({ dtlsParameters }, cb, errback) => {
+              console.log("Recieve transport connecting to server.........");
+              const ok = await socket.emitWithAck("connect-recvTransport", {
+                room,
+                transportId: recvTransport.id,
+                dtlsParameters,
+              });
+
+              if (ok) cb();
+              else errback(new Error("Recv transport DTLS failed"));
             }
           );
         }
@@ -124,3 +247,5 @@ export default function Home() {
     </div>
   );
 }
+
+type TProducer = { producerId: string; peerId: string; kind: string };
